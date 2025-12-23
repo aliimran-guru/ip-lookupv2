@@ -133,48 +133,60 @@ serve(async (req) => {
   }
 
   try {
-    const { ipRange, singleIp } = await req.json();
+    const body = await req.json();
+    const { ipRange, singleIp, target } = body;
     
-    console.log(`Network scan request: ${singleIp || ipRange}`);
+    // Support both 'target' (from frontend) and 'ipRange'/'singleIp' parameters
+    const scanTarget = target || ipRange || singleIp;
     
-    if (singleIp) {
-      // Scan single IP
-      const result = await scanHost(singleIp);
-      return new Response(JSON.stringify({ result }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    console.log(`Network scan request: ${scanTarget}`);
+    
+    if (!scanTarget) {
+      throw new Error("Target IP/range is required. Use 'target', 'ipRange', or 'singleIp' parameter.");
     }
     
-    if (ipRange) {
-      // Scan IP range
-      const ips = parseIPRange(ipRange);
-      console.log(`Scanning ${ips.length} IPs`);
-      
-      // Scan in batches of 10 for performance
-      const batchSize = 10;
-      const results: ScanResult[] = [];
-      
-      for (let i = 0; i < ips.length; i += batchSize) {
-        const batch = ips.slice(i, i + batchSize);
-        const batchResults = await Promise.all(batch.map(scanHost));
-        results.push(...batchResults);
-      }
-      
-      const activeCount = results.filter(r => r.status === "active").length;
-      
+    const startTime = Date.now();
+    
+    // Check if it's a single IP (no range or CIDR)
+    const isSingleIp = !scanTarget.includes("/") && !scanTarget.includes("-");
+    
+    if (isSingleIp) {
+      // Scan single IP
+      const result = await scanHost(scanTarget);
       return new Response(JSON.stringify({ 
-        results,
-        summary: {
-          total: results.length,
-          active: activeCount,
-          inactive: results.length - activeCount,
-        }
+        results: [result],
+        totalHosts: 1,
+        activeHosts: result.status === "active" ? 1 : 0,
+        scanDuration: Date.now() - startTime,
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
     
-    throw new Error("Either ipRange or singleIp is required");
+    // Scan IP range or CIDR
+    const ips = parseIPRange(scanTarget);
+    console.log(`Scanning ${ips.length} IPs`);
+    
+    // Scan in batches of 10 for performance
+    const batchSize = 10;
+    const results: ScanResult[] = [];
+    
+    for (let i = 0; i < ips.length; i += batchSize) {
+      const batch = ips.slice(i, i + batchSize);
+      const batchResults = await Promise.all(batch.map(scanHost));
+      results.push(...batchResults);
+    }
+    
+    const activeCount = results.filter(r => r.status === "active").length;
+    
+    return new Response(JSON.stringify({ 
+      results,
+      totalHosts: results.length,
+      activeHosts: activeCount,
+      scanDuration: Date.now() - startTime,
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
     
   } catch (error: unknown) {
     console.error('Error in network-scan:', error);
