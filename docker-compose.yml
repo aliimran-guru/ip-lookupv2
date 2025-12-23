@@ -1,9 +1,25 @@
 version: '3.8'
 
 services:
+  # Frontend app
   teknisi-ip-lookup:
     build: .
     container_name: teknisi-ip-lookup
     ports:
       - "7351:7351"
     restart: unless-stopped
+    depends_on:
+      - ping-server
+
+  # Self-hosted Deno ICMP Ping Server
+  ping-server:
+    build: ./ping-server
+    container_name: ping-server
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # Network mode host allows real ICMP ping to work
+    # Comment out if not needed or use bridge mode
+    # network_mode: host
+    cap_add:
+      - NET_RAW  # Required for ICMP ping

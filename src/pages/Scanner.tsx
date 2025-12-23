@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +16,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Search,
   Play,
   Square,
@@ -26,6 +33,8 @@ import {
   Network,
   Wifi,
   WifiOff,
+  Radio,
+  Server,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -43,21 +52,47 @@ interface EdgeFunctionResult {
   status: "active" | "inactive";
   responseTime?: number;
   hostname?: string;
+  method?: string;
 }
+
+interface SSEProgress {
+  type: "progress" | "result" | "complete";
+  current?: number;
+  total?: number;
+  currentIp?: string;
+  result?: EdgeFunctionResult;
+  results?: EdgeFunctionResult[];
+  activeHosts?: number;
+  scanDuration?: number;
+}
+
+type ScanMode = "cloud" | "self-hosted";
 
 export default function Scanner() {
   const { toast } = useToast();
   const [inputMode, setInputMode] = useState<"manual" | "cidr">("manual");
-  const [startIp, setStartIp] = useState("192.168.1.1");
-  const [endIp, setEndIp] = useState("192.168.1.254");
-  const [cidr, setCidr] = useState("192.168.1.0/24");
+  const [startIp, setStartIp] = useState("10.1.10.1");
+  const [endIp, setEndIp] = useState("10.1.10.254");
+  const [cidr, setCidr] = useState("10.1.10.0/24");
+  const [scanMode, setScanMode] = useState<ScanMode>("cloud");
+  const [pingServerUrl, setPingServerUrl] = useState("http://localhost:8000");
   const [isScanning, setIsScanning] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [currentIp, setCurrentIp] = useState<string>("");
   const [results, setResults] = useState<ScanResult[]>([]);
   const [currentScan, setCurrentScan] = useState<ScanHistory | null>(null);
   const abortRef = useRef(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Validate IP address format
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
   const validateIP = (ip: string): boolean => {
     const parts = ip.split(".");
     if (parts.length !== 4) return false;
@@ -67,7 +102,6 @@ export default function Scanner() {
     });
   };
 
-  // Validate CIDR format
   const validateCIDR = (cidrInput: string): boolean => {
     const [ip, bits] = cidrInput.split("/");
     if (!ip || !bits) return false;
@@ -75,15 +109,89 @@ export default function Scanner() {
     return validateIP(ip) && !isNaN(bitsNum) && bitsNum >= 24 && bitsNum <= 32;
   };
 
+  // Self-hosted SSE streaming scan
+  const startSelfHostedScan = useCallback(async (target: string, startTime: number) => {
+    return new Promise<{ results: EdgeFunctionResult[], duration: number }>((resolve, reject) => {
+      const url = `${pingServerUrl}/scan/stream?target=${encodeURIComponent(target)}`;
+      const eventSource = new EventSource(url);
+      eventSourceRef.current = eventSource;
+
+      const collectedResults: EdgeFunctionResult[] = [];
+
+      eventSource.onmessage = (event) => {
+        if (abortRef.current) {
+          eventSource.close();
+          reject(new Error("Scan cancelled"));
+          return;
+        }
+
+        try {
+          const data: SSEProgress = JSON.parse(event.data);
+
+          if (data.type === "progress") {
+            setCurrentIp(data.currentIp || "");
+            setProgress(Math.round(((data.current || 0) / (data.total || 1)) * 100));
+          } else if (data.type === "result" && data.result) {
+            collectedResults.push(data.result);
+            setResults([...collectedResults].map(r => ({
+              ip: r.ip,
+              status: r.status,
+              responseTime: r.responseTime,
+              timestamp: Date.now(),
+            })));
+          } else if (data.type === "complete") {
+            eventSource.close();
+            resolve({
+              results: data.results || collectedResults,
+              duration: data.scanDuration || (Date.now() - startTime),
+            });
+          }
+        } catch (e) {
+          console.error("SSE parse error:", e);
+        }
+      };
+
+      eventSource.onerror = (error) => {
+        eventSource.close();
+        reject(new Error("Connection to ping server failed. Make sure it's running."));
+      };
+    });
+  }, [pingServerUrl]);
+
+  // Cloud scan (edge function)
+  const startCloudScan = useCallback(async (target: string, startTime: number) => {
+    const progressInterval = setInterval(() => {
+      if (!abortRef.current) {
+        setProgress((prev) => Math.min(prev + 2, 90));
+      }
+    }, 100);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("network-scan", {
+        body: { target },
+      });
+
+      clearInterval(progressInterval);
+
+      if (error) throw error;
+
+      return {
+        results: data.results as EdgeFunctionResult[],
+        duration: data.scanDuration || (Date.now() - startTime),
+      };
+    } finally {
+      clearInterval(progressInterval);
+    }
+  }, []);
+
   const startScan = useCallback(async () => {
     const target = inputMode === "cidr" ? cidr : `${startIp}-${endIp}`;
-    
-    // Validate input
+
     if (inputMode === "cidr") {
       if (!validateCIDR(cidr)) {
         toast({
           title: "Invalid CIDR",
-          description: "Please enter a valid CIDR (e.g., 192.168.1.0/24)",
+          description: "Please enter a valid CIDR (e.g., 10.1.10.0/24)",
           variant: "destructive",
         });
         return;
@@ -98,7 +206,7 @@ export default function Scanner() {
         return;
       }
     }
-    
+
     if (!target.trim()) {
       toast({
         title: "Error",
@@ -110,33 +218,26 @@ export default function Scanner() {
 
     setIsScanning(true);
     setProgress(0);
+    setCurrentIp("");
     setResults([]);
     abortRef.current = false;
     const startTime = Date.now();
 
     try {
-      // Simulate progress while waiting for edge function
-      const progressInterval = setInterval(() => {
-        if (!abortRef.current) {
-          setProgress((prev) => Math.min(prev + 2, 90));
-        }
-      }, 100);
+      let scanData: { results: EdgeFunctionResult[], duration: number };
 
-      const { data, error } = await supabase.functions.invoke("network-scan", {
-        body: { target },
-      });
-
-      clearInterval(progressInterval);
-      
-      if (abortRef.current) {
-        return;
+      if (scanMode === "self-hosted") {
+        scanData = await startSelfHostedScan(target, startTime);
+      } else {
+        scanData = await startCloudScan(target, startTime);
       }
 
+      if (abortRef.current) return;
+
       setProgress(100);
+      setCurrentIp("");
 
-      if (error) throw error;
-
-      const scanResults: ScanResult[] = (data.results as EdgeFunctionResult[]).map((r) => ({
+      const scanResults: ScanResult[] = scanData.results.map((r) => ({
         ip: r.ip,
         status: r.status,
         responseTime: r.responseTime,
@@ -146,21 +247,20 @@ export default function Scanner() {
 
       setResults(scanResults);
 
-      const endTime = Date.now();
       const activeCount = scanResults.filter((r) => r.status === "active").length;
 
       const history: ScanHistory = {
         id: generateId(),
-        startIp: data.results[0]?.ip || startIp,
-        endIp: data.results[data.results.length - 1]?.ip || endIp,
+        startIp: scanResults[0]?.ip || startIp,
+        endIp: scanResults[scanResults.length - 1]?.ip || endIp,
         cidr: inputMode === "cidr" ? cidr : undefined,
         results: scanResults,
         totalScanned: scanResults.length,
         activeCount,
         inactiveCount: scanResults.length - activeCount,
         startTime,
-        endTime,
-        duration: data.scanDuration || endTime - startTime,
+        endTime: Date.now(),
+        duration: scanData.duration,
       };
 
       setCurrentScan(history);
@@ -171,19 +271,26 @@ export default function Scanner() {
         description: `Scanned ${scanResults.length} IPs. ${activeCount} active, ${scanResults.length - activeCount} inactive.`,
       });
     } catch (error) {
-      toast({
-        title: "Scan Failed",
-        description: error instanceof Error ? error.message : "Failed to scan network",
-        variant: "destructive",
-      });
+      if (!abortRef.current) {
+        toast({
+          title: "Scan Failed",
+          description: error instanceof Error ? error.message : "Failed to scan network",
+          variant: "destructive",
+        });
+      }
     } finally {
       setIsScanning(false);
+      setCurrentIp("");
     }
-  }, [inputMode, cidr, startIp, endIp, toast]);
+  }, [inputMode, cidr, startIp, endIp, scanMode, toast, startSelfHostedScan, startCloudScan]);
 
   const stopScan = () => {
     abortRef.current = true;
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
     setIsScanning(false);
+    setCurrentIp("");
     toast({
       title: "Scan Stopped",
       description: "Network scan has been cancelled",
@@ -221,7 +328,7 @@ export default function Scanner() {
               <span className="gradient-text">IP Scanner</span>
             </h1>
             <p className="text-muted-foreground">
-              Scan range IP untuk mendeteksi perangkat aktif di jaringan (TCP-based)
+              Scan range IP untuk mendeteksi perangkat aktif di jaringan
             </p>
           </div>
 
@@ -238,18 +345,62 @@ export default function Scanner() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {/* Scan Mode Selector */}
+                <div className="space-y-2">
+                  <Label>Scan Mode</Label>
+                  <Select value={scanMode} onValueChange={(v) => setScanMode(v as ScanMode)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cloud">
+                        <div className="flex items-center gap-2">
+                          <Server className="h-4 w-4" />
+                          Cloud (TCP Probe)
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="self-hosted">
+                        <div className="flex items-center gap-2">
+                          <Radio className="h-4 w-4" />
+                          Self-Hosted (ICMP Ping)
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {scanMode === "self-hosted" 
+                      ? "Real ICMP ping via Docker server" 
+                      : "TCP port probing via cloud function"}
+                  </p>
+                </div>
+
+                {/* Self-hosted server URL */}
+                {scanMode === "self-hosted" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="ping-server">Ping Server URL</Label>
+                    <Input
+                      id="ping-server"
+                      placeholder="http://localhost:8000"
+                      value={pingServerUrl}
+                      onChange={(e) => setPingServerUrl(e.target.value)}
+                      disabled={isScanning}
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                )}
+
                 <Tabs value={inputMode} onValueChange={(v) => setInputMode(v as "manual" | "cidr")}>
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="manual">Manual Range</TabsTrigger>
                     <TabsTrigger value="cidr">CIDR</TabsTrigger>
                   </TabsList>
-                  
+
                   <TabsContent value="manual" className="space-y-4 pt-4">
                     <div className="space-y-2">
                       <Label htmlFor="start-ip">Start IP</Label>
                       <Input
                         id="start-ip"
-                        placeholder="192.168.1.1"
+                        placeholder="10.1.10.1"
                         value={startIp}
                         onChange={(e) => setStartIp(e.target.value)}
                         disabled={isScanning}
@@ -260,7 +411,7 @@ export default function Scanner() {
                       <Label htmlFor="end-ip">End IP</Label>
                       <Input
                         id="end-ip"
-                        placeholder="192.168.1.254"
+                        placeholder="10.1.10.254"
                         value={endIp}
                         onChange={(e) => setEndIp(e.target.value)}
                         disabled={isScanning}
@@ -268,13 +419,13 @@ export default function Scanner() {
                       />
                     </div>
                   </TabsContent>
-                  
+
                   <TabsContent value="cidr" className="space-y-4 pt-4">
                     <div className="space-y-2">
                       <Label htmlFor="cidr">CIDR Notation</Label>
                       <Input
                         id="cidr"
-                        placeholder="192.168.1.0/24"
+                        placeholder="10.1.10.0/24"
                         value={cidr}
                         onChange={(e) => setCidr(e.target.value)}
                         disabled={isScanning}
@@ -301,23 +452,50 @@ export default function Scanner() {
                   )}
                 </div>
 
-                {/* Progress */}
+                {/* Progress with current IP */}
                 {isScanning && (
-                  <div className="space-y-2">
+                  <div className="space-y-3 p-4 rounded-lg bg-muted/50 border border-border">
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Scanning...</span>
-                      <span className="font-mono">{Math.round(progress)}%</span>
+                      <span className="text-muted-foreground">Progress</span>
+                      <span className="font-mono font-medium">{Math.round(progress)}%</span>
                     </div>
                     <Progress value={progress} className="h-2" />
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span>Connecting to backend...</span>
+                    
+                    {/* Current IP indicator */}
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                      <div className="flex-1 min-w-0">
+                        {currentIp ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-muted-foreground">Scanning:</span>
+                            <Badge variant="outline" className="font-mono animate-pulse">
+                              {currentIp}
+                            </Badge>
+                          </div>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            {scanMode === "self-hosted" ? "Connecting to ping server..." : "Connecting to cloud..."}
+                          </span>
+                        )}
+                      </div>
                     </div>
+
+                    {/* Live count */}
+                    {results.length > 0 && (
+                      <div className="flex gap-4 text-sm pt-2 border-t border-border/50">
+                        <span className="text-success">
+                          ✓ {results.filter(r => r.status === "active").length} active
+                        </span>
+                        <span className="text-destructive">
+                          ✗ {results.filter(r => r.status === "inactive").length} inactive
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* Stats */}
-                {results.length > 0 && (
+                {results.length > 0 && !isScanning && (
                   <div className="grid grid-cols-3 gap-2 pt-4 border-t border-border">
                     <div className="text-center p-3 rounded-lg bg-success/10">
                       <div className="text-2xl font-bold text-success">{activeCount}</div>
@@ -377,10 +555,18 @@ export default function Scanner() {
                     </CardDescription>
                   </div>
                   {currentScan && (
-                    <Badge variant="secondary" className="gap-1">
-                      <Clock className="h-3 w-3" />
-                      {formatDuration(currentScan.duration)}
-                    </Badge>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="gap-1">
+                        {currentScan.duration < 60000 
+                          ? `${Math.round(currentScan.duration)}ms`
+                          : formatDuration(currentScan.duration)
+                        }
+                      </Badge>
+                      <Badge variant="secondary" className="gap-1">
+                        <Clock className="h-3 w-3" />
+                        {scanMode === "self-hosted" ? "ICMP" : "TCP"}
+                      </Badge>
+                    </div>
                   )}
                 </div>
               </CardHeader>
@@ -408,7 +594,7 @@ export default function Scanner() {
                             <TableRow
                               key={result.ip}
                               className="animate-fade-in"
-                              style={{ animationDelay: `${index * 0.02}s` }}
+                              style={{ animationDelay: `${Math.min(index * 0.02, 1)}s` }}
                             >
                               <TableCell className="font-mono text-sm">
                                 {result.ip}
