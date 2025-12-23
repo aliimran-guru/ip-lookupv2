@@ -1,0 +1,7 @@
+project_id = "ffotklqradjggyacxhcr"
+
+[functions.network-scan]
+verify_jwt = false
+
+[functions.port-scan]
+verify_jwt = false
