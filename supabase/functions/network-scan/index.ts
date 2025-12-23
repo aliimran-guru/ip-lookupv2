@@ -5,43 +5,59 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Extended list of common ports for better device detection
-const DEFAULT_PROBE_PORTS = [
-  // Web
-  80, 443, 8080, 8443, 8000, 8888, 3000, 5000,
-  // Remote access
-  22, 23, 3389, 5900, 5901,
-  // Email
-  25, 110, 143, 465, 587, 993, 995,
-  // File sharing
-  21, 20, 445, 139, 2049,
-  // Database
-  3306, 5432, 1433, 27017, 6379,
-  // DNS & DHCP
-  53, 67, 68,
-  // Printers & IoT
-  9100, 515, 631, 1883, 8883,
-  // Network services
-  161, 162, 179, 389, 636,
-  // Other common
-  111, 135, 137, 138, 1723, 1812
-];
-
 interface ScanResult {
   ip: string;
   status: "active" | "inactive";
   responseTime?: number;
-  openPorts?: number[];
-  timestamp: number;
-  method?: string;
+  method: string;
 }
 
-// Quick connectivity check using multiple methods
-async function quickCheck(ip: string, timeout: number = 800): Promise<{connected: boolean, port?: number}> {
-  // Try the most common ports first for quick detection
-  const quickPorts = [80, 443, 22, 445, 139, 21, 23, 3389, 8080];
+// Try ICMP ping using shell command
+async function icmpPing(ip: string, timeout: number = 2): Promise<ScanResult> {
+  const startTime = Date.now();
   
-  const checks = quickPorts.map(async (port) => {
+  try {
+    // Use Deno.Command to execute ping
+    // -c 1: send 1 packet, -W: timeout in seconds
+    const command = new Deno.Command("ping", {
+      args: ["-c", "1", "-W", String(timeout), ip],
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const process = command.spawn();
+    const status = await process.status;
+    const responseTime = Date.now() - startTime;
+    
+    if (status.success) {
+      console.log(`✓ PING ${ip} - ACTIVE (${responseTime}ms)`);
+      return {
+        ip,
+        status: 'active',
+        responseTime,
+        method: 'icmp'
+      };
+    } else {
+      console.log(`✗ PING ${ip} - inactive`);
+      return {
+        ip,
+        status: 'inactive',
+        method: 'icmp'
+      };
+    }
+  } catch (error: unknown) {
+    // Ping command not available, throw to trigger fallback
+    const msg = error instanceof Error ? error.message : 'unknown';
+    throw new Error(`Ping not available: ${msg}`);
+  }
+}
+
+// TCP connection check as fallback
+async function tcpCheck(ip: string, timeout: number = 1500): Promise<ScanResult> {
+  const startTime = Date.now();
+  const ports = [80, 443, 22, 445, 139, 21, 23, 3389, 8080, 53, 25, 110, 3306, 5432];
+  
+  for (const port of ports) {
     try {
       const conn = await Promise.race([
         Deno.connect({ hostname: ip, port }),
@@ -52,104 +68,50 @@ async function quickCheck(ip: string, timeout: number = 800): Promise<{connected
       
       if (conn && typeof conn === 'object' && 'close' in conn) {
         (conn as Deno.Conn).close();
-        return { connected: true, port };
+        const responseTime = Date.now() - startTime;
+        console.log(`✓ TCP ${ip}:${port} - ACTIVE (${responseTime}ms)`);
+        return {
+          ip,
+          status: 'active',
+          responseTime,
+          method: `tcp:${port}`
+        };
       }
-      return { connected: false };
     } catch {
-      return { connected: false };
+      // Continue to next port
     }
-  });
-  
-  // Return first successful connection
-  const results = await Promise.race([
-    Promise.any(checks.map(p => p.then(r => r.connected ? r : Promise.reject()))).catch(() => ({ connected: false })),
-    new Promise<{connected: boolean}>((resolve) => setTimeout(() => resolve({ connected: false }), timeout + 100))
-  ]);
-  
-  return results;
-}
-
-async function checkPort(ip: string, port: number, timeout: number = 1000): Promise<boolean> {
-  try {
-    const conn = await Promise.race([
-      Deno.connect({ hostname: ip, port }),
-      new Promise<null>((_, reject) => 
-        setTimeout(() => reject(new Error("timeout")), timeout)
-      )
-    ]);
-    
-    if (conn && typeof conn === 'object' && 'close' in conn) {
-      (conn as Deno.Conn).close();
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-async function scanHost(ip: string, ports: number[] = DEFAULT_PROBE_PORTS, quickMode: boolean = false): Promise<ScanResult> {
-  const startTime = Date.now();
-  
-  console.log(`Scanning host: ${ip} (${quickMode ? 'quick' : 'full'} mode, ${ports.length} ports)`);
-  
-  // Quick mode: just check if host is up
-  if (quickMode) {
-    const quickResult = await quickCheck(ip);
-    const responseTime = Date.now() - startTime;
-    
-    console.log(`Host ${ip}: ${quickResult.connected ? 'ACTIVE' : 'inactive'}${quickResult.port ? ` (port ${quickResult.port})` : ''}`);
-    
-    return {
-      ip,
-      status: quickResult.connected ? "active" : "inactive",
-      responseTime: quickResult.connected ? responseTime : undefined,
-      openPorts: quickResult.port ? [quickResult.port] : undefined,
-      timestamp: Date.now(),
-      method: "tcp-quick"
-    };
   }
   
-  // Full scan: check all specified ports
-  const openPorts: number[] = [];
-  
-  // Scan in smaller batches to avoid overwhelming
-  const batchSize = 15;
-  for (let i = 0; i < ports.length; i += batchSize) {
-    const batch = ports.slice(i, i + batchSize);
-    const portChecks = batch.map(async (port) => {
-      const isOpen = await checkPort(ip, port, 800);
-      if (isOpen) {
-        openPorts.push(port);
-      }
-      return isOpen;
-    });
-    await Promise.all(portChecks);
-    
-    // Early exit if we found open ports
-    if (openPorts.length > 0 && i === 0) break;
-  }
-  
-  const isActive = openPorts.length > 0;
-  const responseTime = Date.now() - startTime;
-  
-  console.log(`Host ${ip}: ${isActive ? 'ACTIVE' : 'inactive'}, open ports: ${openPorts.join(', ') || 'none'}`);
-  
+  console.log(`✗ TCP ${ip} - inactive (no open ports found)`);
   return {
     ip,
-    status: isActive ? "active" : "inactive",
-    responseTime: isActive ? responseTime : undefined,
-    openPorts: openPorts.length > 0 ? openPorts.sort((a, b) => a - b) : undefined,
-    timestamp: Date.now(),
-    method: "tcp-full"
+    status: 'inactive',
+    method: 'tcp'
   };
+}
+
+// Main scan function - tries ICMP first, falls back to TCP
+let usePing = true; // Will be set to false if ping is not available
+
+async function scanHost(ip: string, timeout: number = 2000): Promise<ScanResult> {
+  if (usePing) {
+    try {
+      return await icmpPing(ip, Math.ceil(timeout / 1000));
+    } catch {
+      // Ping not available, disable for future calls and use TCP
+      console.log(`ICMP ping not available, switching to TCP mode`);
+      usePing = false;
+    }
+  }
+  
+  return await tcpCheck(ip, timeout);
 }
 
 function parseIPRange(input: string): string[] {
   const ips: string[] = [];
   
-  // CIDR notation
   if (input.includes("/")) {
+    // CIDR notation
     const [baseIp, cidrBits] = input.split("/");
     const bits = parseInt(cidrBits);
     
@@ -165,19 +127,16 @@ function parseIPRange(input: string): string[] {
     
     for (let i = 1; i < numHosts - 1; i++) {
       const ipNum = networkAddress + i;
-      const ip = [
+      ips.push([
         (ipNum >>> 24) & 255,
         (ipNum >>> 16) & 255,
         (ipNum >>> 8) & 255,
         ipNum & 255,
-      ].join(".");
-      ips.push(ip);
+      ].join("."));
     }
-  }
-  // Range notation
-  else if (input.includes("-")) {
-    const [startIp, endIp] = input.split("-").map((s) => s.trim());
-    
+  } else if (input.includes("-")) {
+    // Range notation: 10.1.10.1-10.1.10.254
+    const [startIp, endIp] = input.split("-").map(s => s.trim());
     const startParts = startIp.split(".").map(Number);
     const endParts = endIp.split(".").map(Number);
     
@@ -189,17 +148,15 @@ function parseIPRange(input: string): string[] {
     }
     
     for (let i = startNum; i <= endNum; i++) {
-      const ip = [
+      ips.push([
         (i >>> 24) & 255,
         (i >>> 16) & 255,
         (i >>> 8) & 255,
         i & 255,
-      ].join(".");
-      ips.push(ip);
+      ].join("."));
     }
-  }
-  // Single IP
-  else {
+  } else {
+    // Single IP
     ips.push(input.trim());
   }
   
@@ -207,82 +164,78 @@ function parseIPRange(input: string): string[] {
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
     const body = await req.json();
-    const { ipRange, singleIp, target, ports, quickMode = true } = body;
+    const { ipRange, singleIp, target, timeout = 2000, batchSize = 15 } = body;
     
-    // Support both 'target' (from frontend) and 'ipRange'/'singleIp' parameters
     const scanTarget = target || ipRange || singleIp;
     
-    // Custom ports or use defaults
-    const scanPorts: number[] = ports && Array.isArray(ports) ? ports : DEFAULT_PROBE_PORTS;
-    
-    console.log(`Network scan request: ${scanTarget}, quickMode: ${quickMode}, ports: ${scanPorts.length}`);
-    
     if (!scanTarget) {
-      throw new Error("Target IP/range is required. Use 'target', 'ipRange', or 'singleIp' parameter.");
+      throw new Error("Target IP/range is required (target, ipRange, or singleIp)");
     }
+    
+    console.log(`\n========== NETWORK SCAN ==========`);
+    console.log(`Target: ${scanTarget}`);
+    console.log(`Method: ICMP Ping (with TCP fallback)`);
     
     const startTime = Date.now();
+    const ips = parseIPRange(scanTarget);
     
-    // Check if it's a single IP (no range or CIDR)
-    const isSingleIp = !scanTarget.includes("/") && !scanTarget.includes("-");
+    console.log(`IPs to scan: ${ips.length}`);
     
-    if (isSingleIp) {
-      // Scan single IP - use full scan for single IPs
-      const result = await scanHost(scanTarget, scanPorts, false);
-      return new Response(JSON.stringify({ 
-        results: [result],
-        totalHosts: 1,
-        activeHosts: result.status === "active" ? 1 : 0,
-        scanDuration: Date.now() - startTime,
-        scanMethod: result.method,
-      }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    if (ips.length > 254) {
+      throw new Error("Maximum 254 IPs per scan");
     }
     
-    // Scan IP range or CIDR
-    const ips = parseIPRange(scanTarget);
-    console.log(`Scanning ${ips.length} IPs in ${quickMode ? 'quick' : 'full'} mode`);
-    
-    // Use larger batches for quick mode, smaller for full scan
-    const batchSize = quickMode ? 20 : 10;
     const results: ScanResult[] = [];
     
+    // Scan in batches
     for (let i = 0; i < ips.length; i += batchSize) {
       const batch = ips.slice(i, i + batchSize);
+      console.log(`Batch ${Math.floor(i/batchSize)+1}/${Math.ceil(ips.length/batchSize)}`);
+      
       const batchResults = await Promise.all(
-        batch.map(ip => scanHost(ip, scanPorts, quickMode))
+        batch.map(ip => scanHost(ip, timeout))
       );
       results.push(...batchResults);
-      
-      // Log progress for large scans
-      if (ips.length > 50) {
-        console.log(`Progress: ${Math.min(i + batchSize, ips.length)}/${ips.length} hosts scanned`);
-      }
     }
     
-    const activeCount = results.filter(r => r.status === "active").length;
+    const activeHosts = results.filter(r => r.status === 'active');
+    const scanDuration = Date.now() - startTime;
     
-    return new Response(JSON.stringify({ 
-      results,
+    console.log(`\n========== COMPLETE ==========`);
+    console.log(`Duration: ${scanDuration}ms`);
+    console.log(`Active: ${activeHosts.length}/${results.length}`);
+    console.log(`Method used: ${usePing ? 'ICMP' : 'TCP'}`);
+    if (activeHosts.length > 0) {
+      console.log(`Active IPs: ${activeHosts.map(h => h.ip).join(', ')}`);
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      target: scanTarget,
+      method: usePing ? 'icmp' : 'tcp',
       totalHosts: results.length,
-      activeHosts: activeCount,
-      scanDuration: Date.now() - startTime,
+      activeHosts: activeHosts.length,
+      scanDuration,
+      results: results.sort((a, b) => {
+        const aNum = parseInt(a.ip.split('.')[3], 10);
+        const bNum = parseInt(b.ip.split('.')[3], 10);
+        return aNum - bNum;
+      })
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
     
-  } catch (error: unknown) {
-    console.error('Error in network-scan:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return new Response(JSON.stringify({ error: errorMessage }), {
+  } catch (error) {
+    console.error('Scan error:', error);
+    return new Response(JSON.stringify({ 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
