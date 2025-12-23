@@ -57,8 +57,47 @@ export default function Scanner() {
   const [currentScan, setCurrentScan] = useState<ScanHistory | null>(null);
   const abortRef = useRef(false);
 
+  // Validate IP address format
+  const validateIP = (ip: string): boolean => {
+    const parts = ip.split(".");
+    if (parts.length !== 4) return false;
+    return parts.every((part) => {
+      const num = parseInt(part);
+      return !isNaN(num) && num >= 0 && num <= 255;
+    });
+  };
+
+  // Validate CIDR format
+  const validateCIDR = (cidrInput: string): boolean => {
+    const [ip, bits] = cidrInput.split("/");
+    if (!ip || !bits) return false;
+    const bitsNum = parseInt(bits);
+    return validateIP(ip) && !isNaN(bitsNum) && bitsNum >= 24 && bitsNum <= 32;
+  };
+
   const startScan = useCallback(async () => {
     const target = inputMode === "cidr" ? cidr : `${startIp}-${endIp}`;
+    
+    // Validate input
+    if (inputMode === "cidr") {
+      if (!validateCIDR(cidr)) {
+        toast({
+          title: "Invalid CIDR",
+          description: "Please enter a valid CIDR (e.g., 192.168.1.0/24)",
+          variant: "destructive",
+        });
+        return;
+      }
+    } else {
+      if (!validateIP(startIp) || !validateIP(endIp)) {
+        toast({
+          title: "Invalid IP",
+          description: "Please enter valid start and end IP addresses",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
     
     if (!target.trim()) {
       toast({

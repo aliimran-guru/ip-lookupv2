@@ -12,6 +12,8 @@ import {
   ArrowRight,
   CheckCircle,
   Network,
+  Calendar,
+  Bell,
 } from "lucide-react";
 
 const features = [
@@ -22,28 +24,28 @@ const features = [
       "Scan IP range dengan format manual (192.168.1.1-254) atau CIDR notation (192.168.1.0/24)",
   },
   {
-    icon: Zap,
-    title: "Real-time Progress",
+    icon: Shield,
+    title: "Port Scanning",
     description:
-      "Lihat progress scanning secara real-time dengan animasi yang smooth",
+      "Scan port pada IP target dengan preset (common, web, database) atau custom ports",
   },
   {
-    icon: Shield,
-    title: "Status Detection",
+    icon: Calendar,
+    title: "Scheduled Scans",
     description:
-      "Deteksi status IP aktif atau tidak aktif dengan response time",
+      "Jadwalkan scan otomatis dengan interval yang bisa dikustomisasi",
+  },
+  {
+    icon: Bell,
+    title: "Status Notifications",
+    description:
+      "Notifikasi real-time jika ada perubahan status IP di jaringan",
   },
   {
     icon: Download,
     title: "Export Report",
     description:
       "Export hasil scan ke format PDF atau CSV untuk dokumentasi",
-  },
-  {
-    icon: History,
-    title: "Scan History",
-    description:
-      "Simpan dan akses history scan sebelumnya kapan saja",
   },
   {
     icon: Moon,
@@ -83,13 +85,20 @@ export default function Landing() {
               <Link to="/scanner">
                 <Button size="lg" className="gap-2 glow text-lg px-8">
                   <Search className="h-5 w-5" />
-                  Mulai Scanning
+                  IP Scanner
                   <ArrowRight className="h-5 w-5" />
                 </Button>
               </Link>
-              <Link to="/about">
+              <Link to="/port-scanner">
                 <Button size="lg" variant="outline" className="gap-2 text-lg px-8">
-                  Pelajari Lebih Lanjut
+                  <Shield className="h-5 w-5" />
+                  Port Scanner
+                </Button>
+              </Link>
+              <Link to="/scheduled">
+                <Button size="lg" variant="outline" className="gap-2 text-lg px-8">
+                  <Calendar className="h-5 w-5" />
+                  Scheduled
                 </Button>
               </Link>
             </div>

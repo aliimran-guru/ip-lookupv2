@@ -62,11 +62,30 @@ export default function PortScanner() {
   const [progress, setProgress] = useState(0);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
 
+  // Validate IP address format
+  const validateIP = (ip: string): boolean => {
+    const parts = ip.split(".");
+    if (parts.length !== 4) return false;
+    return parts.every((part) => {
+      const num = parseInt(part);
+      return !isNaN(num) && num >= 0 && num <= 255;
+    });
+  };
+
   const startScan = async () => {
     if (!targetIp.trim()) {
       toast({
         title: "Error",
         description: "Please enter a target IP address",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!validateIP(targetIp.trim())) {
+      toast({
+        title: "Invalid IP",
+        description: "Please enter a valid IP address (e.g., 192.168.1.1)",
         variant: "destructive",
       });
       return;
@@ -84,7 +103,7 @@ export default function PortScanner() {
 
       const { data, error } = await supabase.functions.invoke("port-scan", {
         body: {
-          ip: targetIp,
+          ip: targetIp.trim(),
           preset: preset !== "custom" ? preset : undefined,
           ports: preset === "custom" ? customPorts : undefined,
           timeout,
@@ -96,7 +115,16 @@ export default function PortScanner() {
 
       if (error) throw error;
 
-      setScanResult(data);
+      // Map response from edge function
+      const result: ScanResult = {
+        ip: data.ip,
+        ports: data.ports,
+        scanDuration: data.scanTime || data.scanDuration || 0,
+        openPorts: data.openCount || data.openPorts || 0,
+        closedPorts: data.closedCount || data.closedPorts || 0,
+      };
+
+      setScanResult(result);
 
       toast({
         title: "Scan Complete",
