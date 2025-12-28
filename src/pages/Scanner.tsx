@@ -49,6 +49,7 @@ import {
 } from "@/lib/scanner";
 import { exportToCSV, exportToPDF } from "@/lib/export";
 import { supabase } from "@/integrations/supabase/client";
+import { HostnameInput, saveHostname as saveHostnameToStorage } from "@/components/HostnameSuggestions";
 
 interface EdgeFunctionResult {
   ip: string;
@@ -332,8 +333,10 @@ export default function Scanner() {
   };
 
   const saveHostname = (ip: string) => {
+    const hostnameToSave = editHostnameValue.trim() || undefined;
+    
     setResults(prev => prev.map(r => 
-      r.ip === ip ? { ...r, hostname: editHostnameValue || undefined } : r
+      r.ip === ip ? { ...r, hostname: hostnameToSave } : r
     ));
     
     // Also update currentScan if exists
@@ -341,9 +344,14 @@ export default function Scanner() {
       setCurrentScan({
         ...currentScan,
         results: currentScan.results.map(r =>
-          r.ip === ip ? { ...r, hostname: editHostnameValue || undefined } : r
+          r.ip === ip ? { ...r, hostname: hostnameToSave } : r
         ),
       });
+    }
+    
+    // Save to localStorage for future suggestions
+    if (hostnameToSave) {
+      saveHostnameToStorage(hostnameToSave, ip);
     }
     
     setEditingIp(null);
@@ -667,16 +675,12 @@ export default function Scanner() {
                               <TableCell className="text-sm">
                                 {editingIp === result.ip ? (
                                   <div className="flex items-center gap-1">
-                                    <Input
+                                    <HostnameInput
                                       value={editHostnameValue}
-                                      onChange={(e) => setEditHostnameValue(e.target.value)}
+                                      onChange={setEditHostnameValue}
+                                      onSave={() => saveHostname(result.ip)}
+                                      onCancel={cancelEditHostname}
                                       placeholder="Enter hostname"
-                                      className="h-7 text-sm font-mono"
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") saveHostname(result.ip);
-                                        if (e.key === "Escape") cancelEditHostname();
-                                      }}
-                                      autoFocus
                                     />
                                     <Button
                                       size="icon"
