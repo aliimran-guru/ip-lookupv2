@@ -33,6 +33,9 @@ import {
   Trash2,
   Play,
   AlertCircle,
+  Radio,
+  Server,
+  Settings,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
@@ -67,17 +70,21 @@ const CRON_PRESETS = {
   "0 0 * * *": "Daily at midnight",
 };
 
+type ScanMode = "cloud" | "self-hosted";
+
 export default function ScheduledScans() {
   const { toast } = useToast();
   const [scans, setScans] = useState<ScheduledScan[]>([]);
   const [statusChanges, setStatusChanges] = useState<StatusChange[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [scanMode, setScanMode] = useState<ScanMode>("self-hosted"); // Default to self-hosted
+  const [pingServerUrl, setPingServerUrl] = useState("http://localhost:8000");
   
   // Form state
   const [newScan, setNewScan] = useState({
     name: "",
-    target: "192.168.1.0/24",
+    target: "10.1.10.1-10.1.10.254",
     scan_type: "network",
     cron_expression: "0 * * * *",
   });
@@ -226,25 +233,50 @@ export default function ScheduledScans() {
   const runScanNow = async (scan: ScheduledScan) => {
     toast({
       title: "Scan Started",
-      description: `Running scan: ${scan.name}`,
+      description: `Running scan: ${scan.name} (${scanMode === "self-hosted" ? "ICMP" : "TCP"})`,
     });
 
     try {
-      const { data, error } = await supabase.functions.invoke("network-scan", {
-        body: { target: scan.target },
-      });
+      let scanData: { results: any[], totalHosts: number, activeHosts: number, scanDuration: number };
 
-      if (error) throw error;
+      if (scanMode === "self-hosted") {
+        // Use self-hosted ICMP ping server
+        const response = await fetch(`${pingServerUrl}/scan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target: scan.target, timeout: 2, batchSize: 10 }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Ping server error: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        scanData = {
+          results: data.results,
+          totalHosts: data.totalHosts,
+          activeHosts: data.activeHosts,
+          scanDuration: data.scanDuration,
+        };
+      } else {
+        // Use cloud edge function
+        const { data, error } = await supabase.functions.invoke("network-scan", {
+          body: { target: scan.target },
+        });
+
+        if (error) throw error;
+        scanData = data;
+      }
 
       // Save results
       await supabase.from("scan_results").insert({
         scheduled_scan_id: scan.id,
         target: scan.target,
         scan_type: scan.scan_type,
-        results: data.results,
-        total_hosts: data.totalHosts,
-        active_hosts: data.activeHosts,
-        scan_duration_ms: data.scanDuration,
+        results: scanData.results,
+        total_hosts: scanData.totalHosts,
+        active_hosts: scanData.activeHosts,
+        scan_duration_ms: scanData.scanDuration,
       });
 
       // Update last_run_at
@@ -255,7 +287,7 @@ export default function ScheduledScans() {
 
       toast({
         title: "Scan Complete",
-        description: `Found ${data.activeHosts} active hosts`,
+        description: `Found ${scanData.activeHosts} active hosts`,
       });
 
       fetchScans();
@@ -294,12 +326,35 @@ export default function ScheduledScans() {
             </div>
             
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-              <DialogTrigger asChild>
-                <Button className="gap-2">
-                  <Plus className="h-4 w-4" />
-                  Add Schedule
-                </Button>
-              </DialogTrigger>
+              <div className="flex items-center gap-2">
+                {/* Scan Mode Selector */}
+                <Select value={scanMode} onValueChange={(v) => setScanMode(v as ScanMode)}>
+                  <SelectTrigger className="w-[180px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="self-hosted">
+                      <div className="flex items-center gap-2">
+                        <Radio className="h-4 w-4" />
+                        ICMP Ping
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="cloud">
+                      <div className="flex items-center gap-2">
+                        <Server className="h-4 w-4" />
+                        Cloud TCP
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                
+                <DialogTrigger asChild>
+                  <Button className="gap-2">
+                    <Plus className="h-4 w-4" />
+                    Add Schedule
+                  </Button>
+                </DialogTrigger>
+              </div>
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Create Scheduled Scan</DialogTitle>
@@ -381,6 +436,33 @@ export default function ScheduledScans() {
               </DialogContent>
             </Dialog>
           </div>
+
+          {/* Ping Server Configuration */}
+          {scanMode === "self-hosted" && (
+            <Card className="lg:col-span-3">
+              <CardHeader className="py-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Settings className="h-4 w-4 text-primary" />
+                  Ping Server Configuration
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-2">
+                <div className="flex items-center gap-4">
+                  <Label htmlFor="ping-server-url" className="whitespace-nowrap">Server URL:</Label>
+                  <Input
+                    id="ping-server-url"
+                    value={pingServerUrl}
+                    onChange={(e) => setPingServerUrl(e.target.value)}
+                    placeholder="http://localhost:8000"
+                    className="font-mono text-sm max-w-md"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Run: <code className="bg-muted px-1 py-0.5 rounded">docker-compose up --build</code>
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Scheduled Scans List */}

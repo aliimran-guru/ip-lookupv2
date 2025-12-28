@@ -35,6 +35,9 @@ import {
   WifiOff,
   Radio,
   Server,
+  Pencil,
+  Check,
+  X,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -68,18 +71,25 @@ interface SSEProgress {
 
 type ScanMode = "cloud" | "self-hosted";
 
+// Editable hostname state per IP
+interface EditableResult extends ScanResult {
+  editingHostname?: boolean;
+}
+
 export default function Scanner() {
   const { toast } = useToast();
   const [inputMode, setInputMode] = useState<"manual" | "cidr">("manual");
   const [startIp, setStartIp] = useState("10.1.10.1");
   const [endIp, setEndIp] = useState("10.1.10.254");
   const [cidr, setCidr] = useState("10.1.10.0/24");
-  const [scanMode, setScanMode] = useState<ScanMode>("cloud");
+  const [scanMode, setScanMode] = useState<ScanMode>("self-hosted"); // Default to self-hosted
   const [pingServerUrl, setPingServerUrl] = useState("http://localhost:8000");
   const [isScanning, setIsScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentIp, setCurrentIp] = useState<string>("");
   const [results, setResults] = useState<ScanResult[]>([]);
+  const [editingIp, setEditingIp] = useState<string | null>(null);
+  const [editHostnameValue, setEditHostnameValue] = useState("");
   const [currentScan, setCurrentScan] = useState<ScanHistory | null>(null);
   const abortRef = useRef(false);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -313,6 +323,41 @@ export default function Scanner() {
       title: "Export Complete",
       description: "CSV file has been downloaded",
     });
+  };
+
+  // Hostname editing handlers
+  const startEditHostname = (ip: string, currentHostname?: string) => {
+    setEditingIp(ip);
+    setEditHostnameValue(currentHostname || "");
+  };
+
+  const saveHostname = (ip: string) => {
+    setResults(prev => prev.map(r => 
+      r.ip === ip ? { ...r, hostname: editHostnameValue || undefined } : r
+    ));
+    
+    // Also update currentScan if exists
+    if (currentScan) {
+      setCurrentScan({
+        ...currentScan,
+        results: currentScan.results.map(r =>
+          r.ip === ip ? { ...r, hostname: editHostnameValue || undefined } : r
+        ),
+      });
+    }
+    
+    setEditingIp(null);
+    setEditHostnameValue("");
+    
+    toast({
+      title: "Hostname Updated",
+      description: `Hostname for ${ip} has been saved`,
+    });
+  };
+
+  const cancelEditHostname = () => {
+    setEditingIp(null);
+    setEditHostnameValue("");
   };
 
   const activeCount = results.filter((r) => r.status === "active").length;
@@ -620,8 +665,51 @@ export default function Scanner() {
                                 )}
                               </TableCell>
                               <TableCell className="text-sm">
-                                {result.hostname || (
-                                  <span className="text-muted-foreground">-</span>
+                                {editingIp === result.ip ? (
+                                  <div className="flex items-center gap-1">
+                                    <Input
+                                      value={editHostnameValue}
+                                      onChange={(e) => setEditHostnameValue(e.target.value)}
+                                      placeholder="Enter hostname"
+                                      className="h-7 text-sm font-mono"
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") saveHostname(result.ip);
+                                        if (e.key === "Escape") cancelEditHostname();
+                                      }}
+                                      autoFocus
+                                    />
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-7 w-7"
+                                      onClick={() => saveHostname(result.ip)}
+                                    >
+                                      <Check className="h-3 w-3 text-success" />
+                                    </Button>
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-7 w-7"
+                                      onClick={cancelEditHostname}
+                                    >
+                                      <X className="h-3 w-3 text-destructive" />
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2 group">
+                                    <span className={result.hostname ? "font-mono" : "text-muted-foreground"}>
+                                      {result.hostname || "(not detected)"}
+                                    </span>
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                                      onClick={() => startEditHostname(result.ip, result.hostname)}
+                                      title="Edit hostname"
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                    </Button>
+                                  </div>
                                 )}
                               </TableCell>
                             </TableRow>
