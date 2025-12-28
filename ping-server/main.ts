@@ -1,6 +1,6 @@
 /**
  * Self-hosted Deno ICMP Ping Server
- * Runs in Docker with real ping capability
+ * Runs in Docker with real ping capability + hostname detection
  */
 
 const corsHeaders = {
@@ -13,6 +13,7 @@ interface PingResult {
   ip: string;
   status: "active" | "inactive";
   responseTime?: number;
+  hostname?: string;
   method: "icmp";
 }
 
@@ -23,7 +24,85 @@ interface ScanProgress {
   results: PingResult[];
 }
 
-// Execute ICMP ping command
+// Resolve hostname using multiple methods
+async function resolveHostname(ip: string): Promise<string | undefined> {
+  // Try nslookup first (reverse DNS)
+  try {
+    const nslookup = new Deno.Command("nslookup", {
+      args: [ip],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    
+    const process = nslookup.spawn();
+    const { stdout } = await process.output();
+    const output = new TextDecoder().decode(stdout);
+    
+    // Parse nslookup output for hostname
+    // Look for "name = hostname" pattern
+    const nameMatch = output.match(/name\s*=\s*([^\s]+)/i);
+    if (nameMatch && nameMatch[1]) {
+      const hostname = nameMatch[1].replace(/\.$/, ""); // Remove trailing dot
+      if (hostname && hostname !== ip) {
+        console.log(`  → Hostname (nslookup): ${hostname}`);
+        return hostname;
+      }
+    }
+  } catch (e) {
+    // nslookup failed, try next method
+  }
+
+  // Try getent hosts
+  try {
+    const getent = new Deno.Command("getent", {
+      args: ["hosts", ip],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    
+    const process = getent.spawn();
+    const { stdout } = await process.output();
+    const output = new TextDecoder().decode(stdout).trim();
+    
+    // Output format: "IP hostname alias1 alias2..."
+    const parts = output.split(/\s+/);
+    if (parts.length >= 2 && parts[1] !== ip) {
+      console.log(`  → Hostname (getent): ${parts[1]}`);
+      return parts[1];
+    }
+  } catch (e) {
+    // getent failed, try next method
+  }
+
+  // Try host command
+  try {
+    const host = new Deno.Command("host", {
+      args: [ip],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    
+    const process = host.spawn();
+    const { stdout } = await process.output();
+    const output = new TextDecoder().decode(stdout);
+    
+    // Look for "domain name pointer hostname" pattern
+    const ptrMatch = output.match(/domain name pointer\s+([^\s]+)/i);
+    if (ptrMatch && ptrMatch[1]) {
+      const hostname = ptrMatch[1].replace(/\.$/, "");
+      if (hostname && hostname !== ip) {
+        console.log(`  → Hostname (host): ${hostname}`);
+        return hostname;
+      }
+    }
+  } catch (e) {
+    // host command failed
+  }
+
+  return undefined;
+}
+
+// Execute ICMP ping command with hostname detection
 async function pingHost(ip: string, timeout: number = 2): Promise<PingResult> {
   const startTime = Date.now();
   
@@ -40,10 +119,15 @@ async function pingHost(ip: string, timeout: number = 2): Promise<PingResult> {
 
     if (status.success) {
       console.log(`✓ ${ip} ACTIVE (${responseTime}ms)`);
+      
+      // Try to resolve hostname for active hosts
+      const hostname = await resolveHostname(ip);
+      
       return {
         ip,
         status: "active",
         responseTime,
+        hostname,
         method: "icmp",
       };
     } else {
