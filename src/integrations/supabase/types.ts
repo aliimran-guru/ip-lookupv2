@@ -14,6 +14,42 @@ export type Database = {
   }
   public: {
     Tables: {
+      ip_inventory: {
+        Row: {
+          created_at: string
+          custom_hostname: string | null
+          hostname: string | null
+          hostname_updated_at: string | null
+          id: string
+          ip_address: string
+          last_seen_at: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          custom_hostname?: string | null
+          hostname?: string | null
+          hostname_updated_at?: string | null
+          id?: string
+          ip_address: string
+          last_seen_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          custom_hostname?: string | null
+          hostname?: string | null
+          hostname_updated_at?: string | null
+          id?: string
+          ip_address?: string
+          last_seen_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       ip_status_changes: {
         Row: {
           detected_at: string

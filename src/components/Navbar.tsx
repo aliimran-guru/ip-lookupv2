@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { Network, Home, Search, History, Info, Menu, X, Shield, Calendar } from "lucide-react";
+import { Network, Home, Search, History, Info, Menu, X, Shield, Calendar, Database } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ import { useState } from "react";
 const navItems = [
   { path: "/", label: "Home", icon: Home },
   { path: "/scanner", label: "IP Scanner", icon: Search },
+  { path: "/ip-exist", label: "IP Exist", icon: Database },
   { path: "/port-scanner", label: "Port Scanner", icon: Shield },
   { path: "/scheduled", label: "Scheduled", icon: Calendar },
   { path: "/history", label: "History", icon: History },
