@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -19,6 +20,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import {
   Database,
   Wifi,
@@ -58,6 +70,8 @@ export default function IPExist() {
   const [editHostnameValue, setEditHostnameValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Load inventory from database
   const loadInventory = async () => {
@@ -176,6 +190,56 @@ export default function IPExist() {
     }
   };
 
+  // Bulk delete
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    
+    setIsDeleting(true);
+    try {
+      const { error } = await supabase
+        .from("ip_inventory")
+        .delete()
+        .in("id", Array.from(selectedIds));
+
+      if (error) throw error;
+
+      toast({
+        title: "Deleted",
+        description: `${selectedIds.size} IPs have been removed`,
+      });
+
+      setSelectedIds(new Set());
+      loadInventory();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to delete items",
+        variant: "destructive",
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Select all / deselect all
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredInventory.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredInventory.map((item) => item.id)));
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    const newSelected = new Set(selectedIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedIds(newSelected);
+  };
+
   // Filter inventory
   const filteredInventory = inventory.filter((item) => {
     const matchesSearch =
@@ -192,6 +256,7 @@ export default function IPExist() {
 
   const activeCount = inventory.filter((i) => i.status === "active").length;
   const inactiveCount = inventory.filter((i) => i.status === "inactive").length;
+  const allSelected = filteredInventory.length > 0 && selectedIds.size === filteredInventory.length;
 
   return (
     <Layout>
@@ -277,10 +342,38 @@ export default function IPExist() {
                     {filteredInventory.length} of {inventory.length} IPs
                   </CardDescription>
                 </div>
-                <Button variant="outline" size="sm" onClick={loadInventory}>
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                  Refresh
-                </Button>
+                <div className="flex items-center gap-2">
+                  {selectedIds.size > 0 && (
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button variant="destructive" size="sm" disabled={isDeleting}>
+                          {isDeleting ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4 mr-2" />
+                          )}
+                          Delete ({selectedIds.size})
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Delete {selectedIds.size} IPs?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This action cannot be undone. The selected IPs will be permanently removed from the inventory.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction onClick={handleBulkDelete}>Delete</AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  )}
+                  <Button variant="outline" size="sm" onClick={loadInventory}>
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh
+                  </Button>
+                </div>
               </div>
 
               {/* Filters */}
@@ -323,6 +416,13 @@ export default function IPExist() {
                     <Table>
                       <TableHeader className="sticky top-0 bg-card z-10">
                         <TableRow>
+                          <TableHead className="w-[50px]">
+                            <Checkbox
+                              checked={allSelected}
+                              onCheckedChange={toggleSelectAll}
+                              aria-label="Select all"
+                            />
+                          </TableHead>
                           <TableHead className="w-[150px]">IP Address</TableHead>
                           <TableHead className="w-[100px]">Status</TableHead>
                           <TableHead>Hostname</TableHead>
@@ -332,7 +432,14 @@ export default function IPExist() {
                       </TableHeader>
                       <TableBody>
                         {filteredInventory.map((item) => (
-                          <TableRow key={item.id}>
+                          <TableRow key={item.id} className={selectedIds.has(item.id) ? "bg-muted/50" : ""}>
+                            <TableCell>
+                              <Checkbox
+                                checked={selectedIds.has(item.id)}
+                                onCheckedChange={() => toggleSelect(item.id)}
+                                aria-label={`Select ${item.ip_address}`}
+                              />
+                            </TableCell>
                             <TableCell className="font-mono text-sm">
                               {item.ip_address}
                             </TableCell>
