@@ -50,6 +50,7 @@ import {
 import { exportToCSV, exportToPDF } from "@/lib/export";
 import { supabase } from "@/integrations/supabase/client";
 import { HostnameInput, saveHostname as saveHostnameToStorage } from "@/components/HostnameSuggestions";
+import { useScanState } from "@/hooks/useScanState";
 
 interface EdgeFunctionResult {
   ip: string;
@@ -77,8 +78,13 @@ interface EditableResult extends ScanResult {
   editingHostname?: boolean;
 }
 
+// Global scan state reference to persist across page navigation
+let globalScanAbortRef = { current: false };
+let globalEventSource: EventSource | null = null;
+
 export default function Scanner() {
   const { toast } = useToast();
+  const { scanProgress, setScanProgress, updateProgress } = useScanState();
   const [inputMode, setInputMode] = useState<"manual" | "cidr">("manual");
   const [startIp, setStartIp] = useState("10.1.10.1");
   const [endIp, setEndIp] = useState("10.1.10.254");
@@ -95,12 +101,21 @@ export default function Scanner() {
   const abortRef = useRef(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Cleanup on unmount
+  // Sync with global scan state on mount
+  useEffect(() => {
+    if (scanProgress?.isScanning) {
+      setIsScanning(true);
+      setProgress(scanProgress.progress);
+      setCurrentIp(scanProgress.currentIp);
+      setStartIp(scanProgress.startIp);
+      setEndIp(scanProgress.endIp);
+    }
+  }, []);
+
+  // Cleanup on unmount - but don't stop the scan
   useEffect(() => {
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      // Don't close event source on unmount - let it continue
     };
   }, []);
 
@@ -120,17 +135,41 @@ export default function Scanner() {
     return validateIP(ip) && !isNaN(bitsNum) && bitsNum >= 24 && bitsNum <= 32;
   };
 
+  // Save result to ip_inventory database
+  const saveToInventory = async (result: EdgeFunctionResult) => {
+    try {
+      const { error } = await supabase
+        .from("ip_inventory")
+        .upsert(
+          {
+            ip_address: result.ip,
+            status: result.status,
+            hostname: result.hostname || null,
+            last_seen_at: new Date().toISOString(),
+          },
+          { onConflict: "ip_address" }
+        );
+
+      if (error) {
+        console.error("Failed to save to inventory:", error);
+      }
+    } catch (e) {
+      console.error("Inventory save error:", e);
+    }
+  };
+
   // Self-hosted SSE streaming scan
   const startSelfHostedScan = useCallback(async (target: string, startTime: number) => {
     return new Promise<{ results: EdgeFunctionResult[], duration: number }>((resolve, reject) => {
       const url = `${pingServerUrl}/scan/stream?target=${encodeURIComponent(target)}`;
       const eventSource = new EventSource(url);
       eventSourceRef.current = eventSource;
+      globalEventSource = eventSource;
 
       const collectedResults: EdgeFunctionResult[] = [];
 
       eventSource.onmessage = (event) => {
-        if (abortRef.current) {
+        if (abortRef.current || globalScanAbortRef.current) {
           eventSource.close();
           reject(new Error("Scan cancelled"));
           return;
@@ -141,17 +180,38 @@ export default function Scanner() {
 
           if (data.type === "progress") {
             setCurrentIp(data.currentIp || "");
-            setProgress(Math.round(((data.current || 0) / (data.total || 1)) * 100));
+            const progressValue = Math.round(((data.current || 0) / (data.total || 1)) * 100);
+            setProgress(progressValue);
+            
+            // Update global scan state
+            updateProgress({
+              progress: progressValue,
+              currentIp: data.currentIp || "",
+              activeCount: collectedResults.filter(r => r.status === "active").length,
+              inactiveCount: collectedResults.filter(r => r.status === "inactive").length,
+            });
           } else if (data.type === "result" && data.result) {
             collectedResults.push(data.result);
             setResults([...collectedResults].map(r => ({
               ip: r.ip,
               status: r.status,
               responseTime: r.responseTime,
+              hostname: r.hostname,
               timestamp: Date.now(),
             })));
+            
+            // Save to inventory immediately
+            saveToInventory(data.result);
+            
+            // Update counts
+            updateProgress({
+              activeCount: collectedResults.filter(r => r.status === "active").length,
+              inactiveCount: collectedResults.filter(r => r.status === "inactive").length,
+            });
           } else if (data.type === "complete") {
             eventSource.close();
+            globalEventSource = null;
+            setScanProgress(null); // Clear global scan state
             resolve({
               results: data.results || collectedResults,
               duration: data.scanDuration || (Date.now() - startTime),
@@ -164,10 +224,12 @@ export default function Scanner() {
 
       eventSource.onerror = (error) => {
         eventSource.close();
+        globalEventSource = null;
+        setScanProgress(null);
         reject(new Error("Connection to ping server failed. Make sure it's running."));
       };
     });
-  }, [pingServerUrl]);
+  }, [pingServerUrl, updateProgress, setScanProgress]);
 
   // Cloud scan (edge function)
   const startCloudScan = useCallback(async (target: string, startTime: number) => {
@@ -232,7 +294,20 @@ export default function Scanner() {
     setCurrentIp("");
     setResults([]);
     abortRef.current = false;
+    globalScanAbortRef.current = false;
     const startTime = Date.now();
+
+    // Set global scan state for cross-page visibility
+    setScanProgress({
+      isScanning: true,
+      progress: 0,
+      currentIp: "",
+      activeCount: 0,
+      inactiveCount: 0,
+      startIp,
+      endIp,
+      startTime,
+    });
 
     try {
       let scanData: { results: EdgeFunctionResult[], duration: number };
@@ -241,12 +316,17 @@ export default function Scanner() {
         scanData = await startSelfHostedScan(target, startTime);
       } else {
         scanData = await startCloudScan(target, startTime);
+        // Save cloud results to inventory
+        for (const result of scanData.results) {
+          await saveToInventory(result);
+        }
       }
 
       if (abortRef.current) return;
 
       setProgress(100);
       setCurrentIp("");
+      setScanProgress(null);
 
       const scanResults: ScanResult[] = scanData.results.map((r) => ({
         ip: r.ip,
@@ -279,7 +359,7 @@ export default function Scanner() {
 
       toast({
         title: "Scan Complete",
-        description: `Scanned ${scanResults.length} IPs. ${activeCount} active, ${scanResults.length - activeCount} inactive.`,
+        description: `Scanned ${scanResults.length} IPs. ${activeCount} active, ${scanResults.length - activeCount} inactive. Results saved to IP Inventory.`,
       });
     } catch (error) {
       if (!abortRef.current) {
@@ -292,16 +372,24 @@ export default function Scanner() {
     } finally {
       setIsScanning(false);
       setCurrentIp("");
+      setScanProgress(null);
     }
-  }, [inputMode, cidr, startIp, endIp, scanMode, toast, startSelfHostedScan, startCloudScan]);
+  }, [inputMode, cidr, startIp, endIp, scanMode, toast, startSelfHostedScan, startCloudScan, setScanProgress]);
+
 
   const stopScan = () => {
     abortRef.current = true;
+    globalScanAbortRef.current = true;
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    if (globalEventSource) {
+      globalEventSource.close();
+      globalEventSource = null;
+    }
     setIsScanning(false);
     setCurrentIp("");
+    setScanProgress(null);
     toast({
       title: "Scan Stopped",
       description: "Network scan has been cancelled",

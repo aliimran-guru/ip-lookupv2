@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import Landing from "./pages/Landing";
 import Scanner from "./pages/Scanner";
+import IPExist from "./pages/IPExist";
 import PortScanner from "./pages/PortScanner";
 import ScheduledScans from "./pages/ScheduledScans";
 import History from "./pages/History";
@@ -24,6 +25,7 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/scanner" element={<Scanner />} />
+            <Route path="/ip-exist" element={<IPExist />} />
             <Route path="/port-scanner" element={<PortScanner />} />
             <Route path="/scheduled" element={<ScheduledScans />} />
             <Route path="/history" element={<History />} />
