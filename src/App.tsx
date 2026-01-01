@@ -4,7 +4,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
-import Landing from "./pages/Landing";
 import Scanner from "./pages/Scanner";
 import IPExist from "./pages/IPExist";
 import PortScanner from "./pages/PortScanner";
@@ -23,8 +22,7 @@ const App = () => (
         <Sonner />
         <BrowserRouter>
           <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/scanner" element={<Scanner />} />
+            <Route path="/" element={<Scanner />} />
             <Route path="/ip-exist" element={<IPExist />} />
             <Route path="/port-scanner" element={<PortScanner />} />
             <Route path="/scheduled" element={<ScheduledScans />} />
